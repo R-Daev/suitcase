@@ -3,6 +3,7 @@ import json
 import shutil
 import hashlib
 import logging
+import argparse
 from pathlib import Path
 from datetime import datetime
 
@@ -79,7 +80,7 @@ def plan_moves(target_dir: Path, logger: logging.Logger) -> tuple[list[tuple[Pat
     """Scans directory, checks SHA-256 duplicates, and plans destination paths."""
     normal_moves = []
     duplicate_moves = []
-    seen_hashes = {}  # {hash: original_Path}
+    seen_hashes = {}
 
     ignored_names = {"organizer.py", MANIFEST_NAME, LOG_FILENAME}
 
@@ -87,7 +88,6 @@ def plan_moves(target_dir: Path, logger: logging.Logger) -> tuple[list[tuple[Pat
         if entry.is_file() and entry.name not in ignored_names:
             file_hash = calculate_sha256(entry)
 
-            # Check if this exact file content was already seen
             if file_hash and file_hash in seen_hashes:
                 original = seen_hashes[file_hash]
                 logger.info(f"Duplicate detected: '{entry.name}' is identical to '{original.name}'")
@@ -115,7 +115,7 @@ def save_manifest(target_dir: Path, moves: list[tuple[Path, Path]]) -> None:
         json.dump(data, f, indent=2)
 
 
-def organize(target_dir: Path) -> None:
+def organize(target_dir: Path, dry_run_only: bool = False, auto_confirm: bool = False) -> None:
     logger = setup_logger(target_dir)
     logger.info(f"--- Starting organize session on: {target_dir} ---")
 
@@ -140,11 +140,17 @@ def organize(target_dir: Path) -> None:
 
     print(f"\nTotal operations planned: {len(all_moves)}\n")
 
-    confirm = input("Execute these moves? (yes/no): ").strip().lower()
-    if confirm not in ("y", "yes"):
-        print("Operation cancelled. No files were moved.")
-        logger.info("Organize operation cancelled by user.")
+    if dry_run_only:
+        print("[Dry-run mode] No files were moved.")
+        logger.info("Dry-run preview completed. Exiting without changes.")
         return
+
+    if not auto_confirm:
+        confirm = input("Execute these moves? (yes/no): ").strip().lower()
+        if confirm not in ("y", "yes"):
+            print("Operation cancelled. No files were moved.")
+            logger.info("Organize operation cancelled by user.")
+            return
 
     successful_moves = []
     for src, dst in all_moves:
@@ -165,7 +171,7 @@ def organize(target_dir: Path) -> None:
         logger.info(f"Organize session complete. Moved {len(successful_moves)}/{len(all_moves)} files.")
 
 
-def undo(target_dir: Path) -> None:
+def undo(target_dir: Path, auto_confirm: bool = False) -> None:
     logger = setup_logger(target_dir)
     logger.info(f"--- Starting undo session on: {target_dir} ---")
 
@@ -190,11 +196,12 @@ def undo(target_dir: Path) -> None:
     for item in moves:
         print(f"  {Path(item['current']).name:<30} -> Root folder")
 
-    confirm = input("\nProceed with undo? (yes/no): ").strip().lower()
-    if confirm not in ("y", "yes"):
-        print("Undo cancelled.")
-        logger.info("Undo operation cancelled by user.")
-        return
+    if not auto_confirm:
+        confirm = input("\nProceed with undo? (yes/no): ").strip().lower()
+        if confirm not in ("y", "yes"):
+            print("Undo cancelled.")
+            logger.info("Undo operation cancelled by user.")
+            return
 
     reverted_count = 0
     folders_to_check = set()
@@ -230,23 +237,53 @@ def undo(target_dir: Path) -> None:
     logger.info(f"Undo session complete. Restored {reverted_count}/{len(moves)} files.")
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="suitcase",
+        description="Suitcase: Safe, hash-aware, manifest-backed file organization utility."
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Path to the directory you want to organize or undo."
+    )
+    parser.add_argument(
+        "-u", "--undo",
+        action="store_true",
+        help="Reverses the previous organization run using the local manifest."
+    )
+    parser.add_argument(
+        "-d", "--dry-run",
+        action="store_true",
+        help="Simulate the sorting plan without moving any files."
+    )
+    parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Automatically confirm moves without an interactive prompt."
+    )
+    return parser
+
+
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "--undo":
-        path_input = input("Enter path of the folder to undo: ").strip().strip('"')
-        target = Path(path_input)
-        if not target.is_dir():
-            print("Invalid directory.")
-            return
-        undo(target)
-        return
+    parser = build_parser()
+    args = parser.parse_args()
 
-    path_input = input("Enter path to organize (or pass --undo as flag): ").strip().strip('"')
-    target = Path(path_input)
-    if not target.is_dir():
-        print("Invalid directory.")
-        return
+    # Fall back to prompt if user ran the script without arguments
+    target_str = args.target
+    if not target_str:
+        target_str = input("Enter path to directory: ").strip().strip('"')
 
-    organize(target)
+    target_path = Path(target_str)
+    if not target_path.is_dir():
+        print(f"Error: '{target_str}' is not a valid directory.")
+        sys.exit(1)
+
+    if args.undo:
+        undo(target_path, auto_confirm=args.yes)
+    else:
+        organize(target_path, dry_run_only=args.dry_run, auto_confirm=args.yes)
 
 
 if __name__ == "__main__":
