@@ -1,0 +1,4 @@
+test_folder/
+__pycache__/
+*.log
+.suitcase_manifest.json
