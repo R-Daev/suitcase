@@ -2,3 +2,8 @@ test_folder/
 __pycache__/
 *.log
 .suitcase_manifest.json
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+__pycache__/
