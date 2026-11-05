@@ -1,6 +1,7 @@
 import sys
 import json
 import shutil
+import hashlib
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -17,6 +18,7 @@ EXT_MAPPING = {
 
 MANIFEST_NAME = ".suitcase_manifest.json"
 LOG_FILENAME = "organizer.log"
+DUPLICATES_FOLDER = "Duplicates"
 
 
 def setup_logger(log_dir: Path) -> logging.Logger:
@@ -24,7 +26,6 @@ def setup_logger(log_dir: Path) -> logging.Logger:
     logger = logging.getLogger("Suitcase")
     logger.setLevel(logging.INFO)
 
-    # Avoid duplicate handlers if re-initialized
     if not logger.handlers:
         log_path = log_dir / LOG_FILENAME
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
@@ -36,6 +37,18 @@ def setup_logger(log_dir: Path) -> logging.Logger:
         logger.addHandler(file_handler)
 
     return logger
+
+
+def calculate_sha256(file_path: Path, chunk_size: int = 65536) -> str:
+    """Calculates SHA-256 hash reading the file in 64 KB binary chunks."""
+    sha = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            while chunk := f.read(chunk_size):
+                sha.update(chunk)
+        return sha.hexdigest()
+    except Exception:
+        return ""
 
 
 def get_destination_category(file_path: Path) -> str:
@@ -62,18 +75,34 @@ def get_unique_destination_path(target_dir: Path, filename: str, logger: logging
         counter += 1
 
 
-def plan_moves(target_dir: Path, logger: logging.Logger) -> list[tuple[Path, Path]]:
-    moves = []
+def plan_moves(target_dir: Path, logger: logging.Logger) -> tuple[list[tuple[Path, Path]], list[tuple[Path, Path]]]:
+    """Scans directory, checks SHA-256 duplicates, and plans destination paths."""
+    normal_moves = []
+    duplicate_moves = []
+    seen_hashes = {}  # {hash: original_Path}
+
     ignored_names = {"organizer.py", MANIFEST_NAME, LOG_FILENAME}
 
     for entry in target_dir.iterdir():
         if entry.is_file() and entry.name not in ignored_names:
-            category = get_destination_category(entry)
-            dest_folder = target_dir / category
-            dest_path = get_unique_destination_path(dest_folder, entry.name, logger)
-            moves.append((entry, dest_path))
+            file_hash = calculate_sha256(entry)
 
-    return moves
+            # Check if this exact file content was already seen
+            if file_hash and file_hash in seen_hashes:
+                original = seen_hashes[file_hash]
+                logger.info(f"Duplicate detected: '{entry.name}' is identical to '{original.name}'")
+                dest_folder = target_dir / DUPLICATES_FOLDER
+                dest_path = get_unique_destination_path(dest_folder, entry.name, logger)
+                duplicate_moves.append((entry, dest_path))
+            else:
+                if file_hash:
+                    seen_hashes[file_hash] = entry
+                category = get_destination_category(entry)
+                dest_folder = target_dir / category
+                dest_path = get_unique_destination_path(dest_folder, entry.name, logger)
+                normal_moves.append((entry, dest_path))
+
+    return normal_moves, duplicate_moves
 
 
 def save_manifest(target_dir: Path, moves: list[tuple[Path, Path]]) -> None:
@@ -90,25 +119,35 @@ def organize(target_dir: Path) -> None:
     logger = setup_logger(target_dir)
     logger.info(f"--- Starting organize session on: {target_dir} ---")
 
-    moves = plan_moves(target_dir, logger)
-    if not moves:
+    normal_moves, duplicate_moves = plan_moves(target_dir, logger)
+    all_moves = normal_moves + duplicate_moves
+
+    if not all_moves:
         print("No loose files found to organize.")
-        logger.info("Scan completed: No loose files found to organize.")
+        logger.info("Scan completed: No loose files found.")
         return
 
     print("\n--- Move Preview (Dry Run) ---")
-    for src, dst in moves:
-        print(f"{src.name:<30} -> {dst.parent.name}/{dst.name}")
-    print(f"Total files to organize: {len(moves)}\n")
+    if normal_moves:
+        print(f"Categorized Files ({len(normal_moves)}):")
+        for src, dst in normal_moves:
+            print(f"  {src.name:<30} -> {dst.parent.name}/{dst.name}")
+
+    if duplicate_moves:
+        print(f"\nExact Duplicates Flagged ({len(duplicate_moves)}):")
+        for src, dst in duplicate_moves:
+            print(f"  [DUP] {src.name:<24} -> {DUPLICATES_FOLDER}/{dst.name}")
+
+    print(f"\nTotal operations planned: {len(all_moves)}\n")
 
     confirm = input("Execute these moves? (yes/no): ").strip().lower()
     if confirm not in ("y", "yes"):
         print("Operation cancelled. No files were moved.")
-        logger.info("Organize operation cancelled by user during dry run.")
+        logger.info("Organize operation cancelled by user.")
         return
 
     successful_moves = []
-    for src, dst in moves:
+    for src, dst in all_moves:
         dst.parent.mkdir(parents=True, exist_ok=True)
         try:
             shutil.move(str(src), str(dst))
@@ -121,10 +160,9 @@ def organize(target_dir: Path) -> None:
 
     if successful_moves:
         save_manifest(target_dir, successful_moves)
-        print(f"\nDone. Successfully organized {len(successful_moves)}/{len(moves)} files.")
+        print(f"\nDone. Successfully organized {len(successful_moves)}/{len(all_moves)} files.")
         print(f"Manifest written to: {target_dir / MANIFEST_NAME}")
-        print(f"Log written to: {target_dir / LOG_FILENAME}")
-        logger.info(f"Organize session complete. Moved {len(successful_moves)}/{len(moves)} files.")
+        logger.info(f"Organize session complete. Moved {len(successful_moves)}/{len(all_moves)} files.")
 
 
 def undo(target_dir: Path) -> None:
@@ -150,7 +188,7 @@ def undo(target_dir: Path) -> None:
     print(f"\n--- Undo Preview ---")
     print(f"Restoring {len(moves)} files back to base folder: {target_dir}")
     for item in moves:
-        print(f"{Path(item['current']).name:<30} -> Root folder")
+        print(f"  {Path(item['current']).name:<30} -> Root folder")
 
     confirm = input("\nProceed with undo? (yes/no): ").strip().lower()
     if confirm not in ("y", "yes"):
@@ -179,7 +217,6 @@ def undo(target_dir: Path) -> None:
             print(skip_msg)
             logger.warning(skip_msg)
 
-    # Clean up empty category subfolders
     for folder in folders_to_check:
         try:
             if folder.exists() and not any(folder.iterdir()):
